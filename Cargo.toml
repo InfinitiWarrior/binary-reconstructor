@@ -1,0 +1,10 @@
+[package]
+name = "binary-reconstructor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nix = { version = "0.31.3", features = ["process", "ptrace"] }
+libc = "0.2"
+serde_json = "1.0"
+capstone = "0.14.0"
