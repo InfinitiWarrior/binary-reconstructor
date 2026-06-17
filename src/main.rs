@@ -6,6 +6,8 @@ use capstone::prelude::*;
 use std::fs::File;
 use std::io::Write;
 
+mod phase2;
+
 #[derive(serde::Serialize)]
 struct Instruction {
     address: u64,
@@ -20,6 +22,9 @@ struct Instruction {
 fn main() {
     let target = "/bin/echo";
     let args = vec!["hello"];
+    
+    // Create output directory
+    std::fs::create_dir_all("output").expect("Failed to create output directory");
     
     match unsafe { fork() }.expect("fork failed") {
         ForkResult::Child => {
@@ -97,14 +102,26 @@ fn main() {
                 }
             }
             
-            // Save to JSON
+            // Save trace to JSON
             let json = serde_json::to_string_pretty(&instructions)
                 .expect("Failed to serialize");
             
-            let mut file = File::create("trace.json").expect("Failed to create file");
+            let mut file = File::create("output/trace.json").expect("Failed to create file");
             file.write_all(json.as_bytes()).expect("Failed to write file");
+            println!("Saved trace to output/trace.json");
             
-            println!("Saved trace to trace.json");
+            // Phase 2: Analyze CFG
+            match phase2::analyze_trace("output/trace.json") {
+                Ok(blocks) => {
+                    println!("Found {} basic blocks", blocks.len());
+                    let cfg_json = serde_json::to_string_pretty(&blocks)
+                        .expect("Failed to serialize CFG");
+                    let mut file = File::create("output/cfg.json").expect("Failed to create CFG file");
+                    file.write_all(cfg_json.as_bytes()).expect("Failed to write CFG");
+                    println!("Saved CFG to output/cfg.json");
+                }
+                Err(e) => println!("Error analyzing trace: {}", e),
+            }
         }
     }
 }
