@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 
 #[derive(Deserialize)]
 struct BasicBlock {
@@ -29,12 +30,10 @@ pub fn generate_pseudocode(cfg_file: &str) -> Result<Vec<PseudoFunction>, Box<dy
     
     let mut functions = Vec::new();
     let mut code_lines = Vec::new();
-    
-    // Create register-to-variable mapping
     let mut reg_map: HashMap<String, String> = HashMap::new();
     let mut var_counter = 0;
     
-    for block in &blocks[..blocks.len().min(100)] { // Limit to first 100 blocks for MVP
+    for block in &blocks[..blocks.len().min(100)] {
         for instr in &block.instructions {
             let line = instruction_to_rust(&instr, &mut reg_map, &mut var_counter);
             code_lines.push(line);
@@ -48,6 +47,39 @@ pub fn generate_pseudocode(cfg_file: &str) -> Result<Vec<PseudoFunction>, Box<dy
     
     functions.push(function);
     Ok(functions)
+}
+
+pub fn generate_rust_file(
+    cfg_file: &str,
+    output_file: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let data = fs::read_to_string(cfg_file)?;
+    let blocks: Vec<BasicBlock> = serde_json::from_str(&data)?;
+    
+    let mut reg_map: HashMap<String, String> = HashMap::new();
+    let mut var_counter = 0;
+    let mut code_lines = Vec::new();
+    
+    // Generate instructions only (no declarations)
+    for block in &blocks[..blocks.len().min(100)] {
+        for instr in &block.instructions {
+            let line = instruction_to_rust(&instr, &mut reg_map, &mut var_counter);
+            if !line.is_empty() {
+                code_lines.push(line);
+            }
+        }
+    }
+    
+    // Build final Rust code - no declarations, just code
+    let rust_code = format!(
+        "fn func_main() {{\n{}\n}}\n\nfn main() {{\n    func_main();\n}}\n",
+        code_lines.join("\n")
+    );
+    
+    let mut file = std::fs::File::create(output_file)?;
+    file.write_all(rust_code.as_bytes())?;
+    
+    Ok(())
 }
 
 fn instruction_to_rust(
@@ -98,7 +130,7 @@ fn instruction_to_rust(
             let val = operand_to_var(operands.get(0).unwrap_or(&"?"), reg_map, var_counter);
             format!("    // pop {}", val)
         }
-        _ => format!("    // {}", instr.mnemonic),
+        _ => String::new(),
     }
 }
 
@@ -109,7 +141,6 @@ fn operand_to_var(
 ) -> String {
     let clean = operand.trim();
     
-    // Check if it's a register
     if is_register(clean) {
         reg_map
             .entry(clean.to_string())
@@ -119,10 +150,8 @@ fn operand_to_var(
             })
             .clone()
     } else if clean.starts_with("0x") {
-        // Hex immediate
         clean.to_string()
     } else {
-        // Memory or other
         clean.to_string()
     }
 }
@@ -130,7 +159,9 @@ fn operand_to_var(
 fn is_register(s: &str) -> bool {
     matches!(
         s,
-        "rax" | "rbx" | "rcx" | "rdx" | "rsi" | "rdi" | "r8" | "r9" | "r10" | "r11" | "r12"
-            | "r13" | "r14" | "r15" | "eax" | "ebx" | "ecx" | "edx" | "esi" | "edi"
+        "rax" | "rbx" | "rcx" | "rdx" | "rsi" | "rdi" | "rbp" | "rsp" |
+        "r8" | "r9" | "r10" | "r11" | "r12" | "r13" | "r14" | "r15" |
+        "eax" | "ebx" | "ecx" | "edx" | "esi" | "edi" | "ebp" | "esp" |
+        "r8d" | "r9d" | "r10d" | "r11d" | "r12d" | "r13d" | "r14d" | "r15d"
     )
 }

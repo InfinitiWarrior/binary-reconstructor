@@ -8,6 +8,7 @@ use std::io::Write;
 
 mod phase2;
 mod phase3;
+mod phase4;
 
 #[derive(serde::Serialize)]
 struct Instruction {
@@ -24,7 +25,6 @@ fn main() {
     let target = "/bin/echo";
     let args = vec!["hello"];
     
-    // Create output directory
     std::fs::create_dir_all("output").expect("Failed to create output directory");
     
     match unsafe { fork() }.expect("fork failed") {
@@ -103,15 +103,12 @@ fn main() {
                 }
             }
             
-            // Save trace to JSON
             let json = serde_json::to_string_pretty(&instructions)
                 .expect("Failed to serialize");
-            
             let mut file = File::create("output/trace.json").expect("Failed to create file");
             file.write_all(json.as_bytes()).expect("Failed to write file");
             println!("Saved trace to output/trace.json");
             
-            // Phase 2: Analyze CFG
             match phase2::analyze_trace("output/trace.json") {
                 Ok(blocks) => {
                     println!("Found {} basic blocks", blocks.len());
@@ -123,18 +120,30 @@ fn main() {
                 }
                 Err(e) => println!("Error analyzing trace: {}", e),
             }
-
-            // Phase 3: Generate pseudocode
-            match phase3::generate_pseudocode("output/cfg.json") {
-                Ok(functions) => {
-                    println!("Generated {} functions", functions.len());
-                    let rust_json = serde_json::to_string_pretty(&functions)
-                        .expect("Failed to serialize");
-                    let mut file = File::create("output/pseudocode.json").expect("Failed to create pseudocode file");
-                    file.write_all(rust_json.as_bytes()).expect("Failed to write pseudocode");
-                    println!("Saved pseudocode to output/pseudocode.json");
+            
+            match phase3::generate_rust_file("output/cfg.json", "output/reconstructed.rs") {
+                Ok(_) => {
+                    println!("Generated Rust code to output/reconstructed.rs");
+                    if let Ok(content) = std::fs::read_to_string("output/reconstructed.rs") {
+                        for (i, line) in content.lines().enumerate().take(60) {
+                            println!("{}", line);
+                        }
+                    }
                 }
-                Err(e) => println!("Error generating pseudocode: {}", e),
+                Err(e) => println!("Error generating Rust file: {}", e),
+            }
+
+            match phase4::cleanup_rust_code("output/reconstructed.rs", "output/reconstructed_clean.rs") {
+                Ok(_) => {
+                    println!("Generated clean Rust to output/reconstructed_clean.rs");
+                    if let Ok(content) = std::fs::read_to_string("output/reconstructed_clean.rs") {
+                        println!("\n--- First 50 lines ---");
+                        for line in content.lines().take(50) {
+                            println!("{}", line);
+                        }
+                    }
+                }
+                Err(e) => println!("Error cleaning Rust: {}", e),
             }
         }
     }
