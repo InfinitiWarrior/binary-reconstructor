@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::Write;
 
 mod phase2;
+mod phase3;
 
 #[derive(serde::Serialize)]
 struct Instruction {
@@ -121,6 +122,19 @@ fn main() {
                     println!("Saved CFG to output/cfg.json");
                 }
                 Err(e) => println!("Error analyzing trace: {}", e),
+            }
+
+            // Phase 3: Generate pseudocode
+            match phase3::generate_pseudocode("output/cfg.json") {
+                Ok(functions) => {
+                    println!("Generated {} functions", functions.len());
+                    let rust_json = serde_json::to_string_pretty(&functions)
+                        .expect("Failed to serialize");
+                    let mut file = File::create("output/pseudocode.json").expect("Failed to create pseudocode file");
+                    file.write_all(rust_json.as_bytes()).expect("Failed to write pseudocode");
+                    println!("Saved pseudocode to output/pseudocode.json");
+                }
+                Err(e) => println!("Error generating pseudocode: {}", e),
             }
         }
     }
