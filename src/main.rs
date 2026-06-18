@@ -9,6 +9,7 @@ use std::io::Write;
 mod phase2;
 mod phase3;
 mod phase4;
+mod phase5;
 
 #[derive(serde::Serialize)]
 struct Instruction {
@@ -144,6 +145,17 @@ fn main() {
                     }
                 }
                 Err(e) => println!("Error cleaning Rust: {}", e),
+            }
+
+            match phase5::extract_functions("output/cfg.json") {
+                Ok(functions) => {
+                    println!("\nPhase 5: Function Extraction");
+                    println!("Found {} functions:", functions.len());
+                    for func in &functions {
+                        println!("  {} @ 0x{:x}", func.name, func.address);
+                    }
+                }
+                Err(e) => println!("Error extracting functions: {}", e),
             }
         }
     }
