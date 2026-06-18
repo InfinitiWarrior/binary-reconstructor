@@ -126,7 +126,7 @@ fn main() {
                 Ok(_) => {
                     println!("Generated Rust code to output/reconstructed.rs");
                     if let Ok(content) = std::fs::read_to_string("output/reconstructed.rs") {
-                        for (i, line) in content.lines().enumerate().take(60) {
+                        for line in content.lines().take(60) {
                             println!("{}", line);
                         }
                     }
@@ -154,8 +154,19 @@ fn main() {
                     for func in &functions {
                         println!("  {} @ 0x{:x}", func.name, func.address);
                     }
+                    
+                    // Output the cleaned code as multi-function file
+                    if let Ok(clean_content) = std::fs::read_to_string("output/reconstructed_clean.rs") {
+                        let mut output = String::from("// Dynamic binary reconstructor - multi-function output\n\n");
+                        output.push_str(&clean_content);
+                        
+                        let mut file = std::fs::File::create("output/reconstructed_multi.rs")
+                            .expect("Failed to create multi-function file");
+                        file.write_all(output.as_bytes()).expect("Failed to write");
+                        println!("Wrote output/reconstructed_multi.rs");
+                    }
                 }
-                Err(e) => println!("Error extracting functions: {}", e),
+                Err(e) => println!("Error in phase 5: {}", e),
             }
         }
     }
