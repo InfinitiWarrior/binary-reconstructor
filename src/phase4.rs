@@ -34,7 +34,7 @@ pub fn cleanup_rust_code(input_file: &str, output_file: &str) -> Result<(), Box<
     in_function = false;
     let mut first_code_line = true;
     
-    for (_idx, line) in lines.iter().enumerate() {
+    for line in lines.iter() {
         let trimmed = line.trim();
         
         if trimmed.starts_with("fn func_main()") {
@@ -48,7 +48,7 @@ pub fn cleanup_rust_code(input_file: &str, output_file: &str) -> Result<(), Box<
             continue;
         }
         
-        // Skip ALL declarations from original
+        // Skip original declarations
         if trimmed.starts_with("let mut") || trimmed.contains("::") {
             continue;
         }
@@ -58,18 +58,18 @@ pub fn cleanup_rust_code(input_file: &str, output_file: &str) -> Result<(), Box<
             continue;
         }
         
-        // Skip memory operations
-        if trimmed.contains("dword ptr") || trimmed.contains("qword ptr") {
-            continue;
-        }
-        
-        // Skip comments
+        // Skip pure comments
         if trimmed.starts_with("//") {
             continue;
         }
         
-        // Add clean declarations before first real code line
-        if first_code_line && !trimmed.is_empty() && trimmed != "}" && !trimmed.starts_with("//") {
+        // Skip closing brace of original function
+        if trimmed == "}" && in_function {
+            continue;
+        }
+        
+        // Add declarations before first code line
+        if first_code_line && !trimmed.is_empty() && !trimmed.starts_with("fn ") {
             let mut sorted_vars: Vec<_> = all_vars.iter().collect();
             sorted_vars.sort();
             for var in sorted_vars {
@@ -80,18 +80,19 @@ pub fn cleanup_rust_code(input_file: &str, output_file: &str) -> Result<(), Box<
         }
         
         // Clean and add code lines
-        if !trimmed.is_empty() && !trimmed.starts_with("fn ") && trimmed != "}" {
+        if !trimmed.is_empty() && !trimmed.starts_with("fn ") {
             let cleaned = clean_line(trimmed);
             if !cleaned.is_empty() {
                 output.push(format!("    {}", cleaned));
             }
         }
-        
-        if trimmed == "}" && in_function {
-            output.push("}".to_string());
-            in_function = false;
-        }
     }
+    
+    output.push("}".to_string());
+    output.push("".to_string());
+    output.push("fn main() {".to_string());
+    output.push("    func_main();".to_string());
+    output.push("}".to_string());
     
     let final_code = output.join("\n");
     let mut file = std::fs::File::create(output_file)?;
@@ -100,48 +101,57 @@ pub fn cleanup_rust_code(input_file: &str, output_file: &str) -> Result<(), Box<
     Ok(())
 }
 
-fn extract_var_name(line: &str) -> Option<String> {
-    if line.contains("let mut ") {
-        let start = line.find("let mut ")? + 8;
-        let rest = &line[start..];
-        if let Some(colon_pos) = rest.find(':') {
-            let var = rest[..colon_pos].trim().to_string();
-            if var.starts_with("var_") {
-                return Some(var);
-            }
-        }
-    }
-    None
-}
-
 fn clean_line(line: &str) -> String {
     let mut result = line.to_string();
     
-    // Remove memory syntax
-    result = result.replace("dword ptr [", "[");
-    result = result.replace("qword ptr [", "[");
+    // Strip all memory syntax prefixes
+    result = result.replace("qword ptr ", "");
+    result = result.replace("dword ptr ", "");
+    result = result.replace("word ptr ", "");
+    result = result.replace("byte ptr ", "");
     
-    // Convert ALL register names to variables (both LHS and RHS)
-    let registers = vec![
-        "rbp", "rsp", "r12d", "r9d", "r8d", "r10d", "r11d", "r13d", "r14d", "r15d",
-        "rdi", "rsi", "rax", "rbx", "rcx", "rdx",
-    ];
-    
-    for reg in registers {
-        // RHS (after spaces, commas, operators)
-        result = result.replace(&format!(" {}", reg), &format!(" var_{}", reg));
-        result = result.replace(&format!("={}", reg), &format!("=var_{}", reg));
-        result = result.replace(&format!("({}", reg), &format!("(var_{}", reg));
-        // LHS
-        result = result.replace(&format!("{} =", reg), &format!("var_{} =", reg));
-        result = result.replace(&format!("{} +=", reg), &format!("var_{} +=", reg));
-        result = result.replace(&format!("{} -=", reg), &format!("var_{} -=", reg));
-        result = result.replace(&format!("{} ^=", reg), &format!("var_{} ^=", reg));
+    // Convert memory address patterns to comments
+    if result.contains('[') && result.contains(']') {
+        return format!("// {}", result);
     }
     
-    // Keep valid Rust
+    // Register mappings: all 8-bit, 16-bit, 32-bit, 64-bit variants
+    let registers = vec![
+        ("sil", "var_si"), ("dil", "var_di"), ("al", "var_al"), ("bl", "var_bl"),
+        ("cl", "var_cl"), ("dl", "var_dl"), ("r8b", "var_r8"), ("r9b", "var_r9"),
+        ("r10b", "var_r10"), ("r11b", "var_r11"), ("r12b", "var_r12"), ("r13b", "var_r13"),
+        ("r14b", "var_r14"), ("r15b", "var_r15"),
+        ("si", "var_si"), ("di", "var_di"), ("ax", "var_ax"), ("bx", "var_bx"),
+        ("cx", "var_cx"), ("dx", "var_dx"), ("r8w", "var_r8"), ("r9w", "var_r9"),
+        ("r10w", "var_r10"), ("r11w", "var_r11"), ("r12w", "var_r12"), ("r13w", "var_r13"),
+        ("r14w", "var_r14"), ("r15w", "var_r15"),
+        ("esi", "var_esi"), ("edi", "var_edi"), ("eax", "var_eax"), ("ebx", "var_ebx"),
+        ("ecx", "var_ecx"), ("edx", "var_edx"), ("r8d", "var_r8"), ("r9d", "var_r9"),
+        ("r10d", "var_r10"), ("r11d", "var_r11"), ("r12d", "var_r12"), ("r13d", "var_r13"),
+        ("r14d", "var_r14"), ("r15d", "var_r15"),
+        ("rsi", "var_rsi"), ("rdi", "var_rdi"), ("rax", "var_rax"), ("rbx", "var_rbx"),
+        ("rcx", "var_rcx"), ("rdx", "var_rdx"), ("rbp", "var_rbp"), ("rsp", "var_rsp"),
+        ("r8", "var_r8"), ("r9", "var_r9"), ("r10", "var_r10"), ("r11", "var_r11"),
+        ("r12", "var_r12"), ("r13", "var_r13"), ("r14", "var_r14"), ("r15", "var_r15"),
+    ];
+    
+    for (reg, replacement) in registers {
+        // Match register as whole word (boundary checks)
+        result = result.replace(&format!(" {}", reg), &format!(" {}", replacement));
+        result = result.replace(&format!("={}", reg), &format!("={}", replacement));
+        result = result.replace(&format!("({}", reg), &format!("({}", replacement));
+        result = result.replace(&format!(" {}{}", reg, ","), &format!(" {}{}", replacement, ","));
+        result = result.replace(&format!("{}(", reg), &format!("{}(", replacement));
+        result = result.replace(&format!("{} =", reg), &format!("{} =", replacement));
+        result = result.replace(&format!("{} +=", reg), &format!("{} +=", replacement));
+        result = result.replace(&format!("{} -=", reg), &format!("{} -=", replacement));
+        result = result.replace(&format!("{} ^=", reg), &format!("{} ^=", replacement));
+    }
+    
+    // Only keep valid Rust statements
     if result.contains('=') || result.contains("+=") || result.contains("-=") || 
-       result.contains("^=") || result.contains("if ") {
+       result.contains("^=") || result.contains("&=") || result.contains("|=") ||
+       result.contains("if ") || result.contains("while ") {
         return result;
     }
     

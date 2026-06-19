@@ -1,39 +1,38 @@
 use nix::unistd::{fork, execv, ForkResult};
 use nix::sys::ptrace;
 use nix::sys::wait::{waitpid, WaitStatus};
+use nix::sys::signal::Signal;
 use std::ffi::CString;
 use capstone::prelude::*;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 
 mod phase2;
 mod phase3;
 mod phase4;
 mod phase5;
 
-#[derive(serde::Serialize)]
-struct Instruction {
-    address: u64,
-    mnemonic: String,
-    op_str: String,
-    rax: u64,
-    rbx: u64,
-    rcx: u64,
-    rdx: u64,
-}
-
 fn main() {
-    let target = "/bin/echo";
-    let args = vec!["hello"];
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} <binary> [args...]", args[0]);
+        std::process::exit(1);
+    }
+    
+    let target = args[1].clone();
+    let bin_args: Vec<String> = args[2..].to_vec();
+    
+    println!("Target: {}", target);
+    println!("Streaming JSON output (constant memory)");
     
     std::fs::create_dir_all("output").expect("Failed to create output directory");
     
     match unsafe { fork() }.expect("fork failed") {
         ForkResult::Child => {
             ptrace::traceme().expect("traceme failed");
-            let target_c = CString::new(target).unwrap();
-            let args_c: Vec<CString> = args.iter()
-                .map(|s| CString::new(*s).unwrap())
+            let target_c = CString::new(target.clone()).unwrap();
+            let args_c: Vec<CString> = bin_args.iter()
+                .map(|s| CString::new(s.as_str()).unwrap())
                 .collect();
             let _ = execv(&target_c, &args_c);
             std::process::exit(1);
@@ -48,27 +47,31 @@ fn main() {
                 .build()
                 .expect("Failed to create Capstone");
             
-            let mut instructions = Vec::new();
+            let file = File::create("output/trace.json").expect("Failed to create trace.json");
+            let mut writer = BufWriter::new(file);
+            
+            writer.write_all(b"[\n").expect("Failed to write opening bracket");
+            
             let mut instr_count = 0;
-            let mut first_stop = true;
+            let mut first_instr = true;
             
             loop {
                 match waitpid(child, None).expect("waitpid failed") {
                     WaitStatus::Exited(_, code) => {
                         println!("Child exited with code: {}", code);
-                        println!("Traced {} instructions", instr_count);
+                        writer.write_all(b"\n]\n").expect("Failed to write closing bracket");
+                        writer.flush().expect("Failed to flush");
+                        println!("Traced {} instructions total", instr_count);
                         break;
                     }
                     WaitStatus::Stopped(_, _signal) => {
-                        if first_stop {
-                            first_stop = false;
-                            ptrace::syscall(child, None).expect("syscall failed");
-                            continue;
-                        }
-                        
                         if let Ok(regs) = ptrace::getregs(child) {
                             let rip = regs.rip;
                             instr_count += 1;
+                            
+                            if instr_count % 100000 == 0 {
+                                println!("Progress: {} instructions", instr_count);
+                            }
                             
                             let mut code = [0u8; 15];
                             for i in 0..15usize {
@@ -83,15 +86,22 @@ fn main() {
                                     let mnemonic = instr.mnemonic().unwrap_or("?").to_string();
                                     let op_str = instr.op_str().unwrap_or("").to_string();
                                     
-                                    instructions.push(Instruction {
-                                        address: instr.address(),
-                                        mnemonic,
-                                        op_str,
-                                        rax: regs.rax,
-                                        rbx: regs.rbx,
-                                        rcx: regs.rcx,
-                                        rdx: regs.rdx,
-                                    });
+                                    if !first_instr {
+                                        writer.write_all(b",\n").expect("Failed to write comma");
+                                    }
+                                    first_instr = false;
+                                    
+                                    let json = format!(
+                                        "  {{\n    \"address\": {},\n    \"mnemonic\": \"{}\",\n    \"op_str\": \"{}\",\n    \"rax\": {},\n    \"rbx\": {},\n    \"rcx\": {},\n    \"rdx\": {}\n  }}",
+                                        instr.address(),
+                                        mnemonic.replace("\"", "\\\""),
+                                        op_str.replace("\"", "\\\""),
+                                        regs.rax,
+                                        regs.rbx,
+                                        regs.rcx,
+                                        regs.rdx
+                                    );
+                                    writer.write_all(json.as_bytes()).expect("Failed to write instruction");
                                 }
                             }
                         }
@@ -104,10 +114,6 @@ fn main() {
                 }
             }
             
-            let json = serde_json::to_string_pretty(&instructions)
-                .expect("Failed to serialize");
-            let mut file = File::create("output/trace.json").expect("Failed to create file");
-            file.write_all(json.as_bytes()).expect("Failed to write file");
             println!("Saved trace to output/trace.json");
             
             match phase2::analyze_trace("output/trace.json") {
@@ -126,6 +132,7 @@ fn main() {
                 Ok(_) => {
                     println!("Generated Rust code to output/reconstructed.rs");
                     if let Ok(content) = std::fs::read_to_string("output/reconstructed.rs") {
+                        println!("\n--- First 60 lines ---");
                         for line in content.lines().take(60) {
                             println!("{}", line);
                         }
@@ -155,9 +162,8 @@ fn main() {
                         println!("  {} @ 0x{:x}", func.name, func.address);
                     }
                     
-                    // Output the cleaned code as multi-function file
                     if let Ok(clean_content) = std::fs::read_to_string("output/reconstructed_clean.rs") {
-                        let mut output = String::from("// Dynamic binary reconstructor - multi-function output\n\n");
+                        let mut output = String::from("// Dynamic binary reconstructor - streaming trace\n\n");
                         output.push_str(&clean_content);
                         
                         let mut file = std::fs::File::create("output/reconstructed_multi.rs")
