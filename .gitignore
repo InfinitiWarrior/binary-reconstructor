@@ -6,3 +6,4 @@ target/
 *.swo
 *~
 Cargo.lock
+syscall_events.json
