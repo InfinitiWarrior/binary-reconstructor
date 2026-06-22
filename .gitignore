@@ -1,5 +1,4 @@
 output/
-src/bin/
 target/
 .DS_Store
 *.swp
@@ -7,3 +6,12 @@ target/
 *~
 Cargo.lock
 syscall_events.json
+uprobe_events.json*.o
+ebpf/*.o
+ebpf/ringbuf_reader
+ebpf/uprobe_reader
+syscall_events.json
+ls_syscalls.json
+*.json
+target/
+.DS_Store
