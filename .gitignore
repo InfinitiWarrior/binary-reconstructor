@@ -15,3 +15,14 @@ ls_syscalls.json
 *.json
 target/
 .DS_Store
+*.o
+ebpf/*.o
+ebpf/ringbuf_reader
+ebpf/uprobe_reader
+syscall_events.json
+ls_syscalls.json
+reconstructed.c
+reconstructed
+*.json
+target/
+.DS_Store

@@ -13,45 +13,36 @@ static void sig_handler(int sig) {
     exiting = 1;
 }
 
-struct uprobe_event {
+struct event {
     unsigned long long timestamp;
-    unsigned int pid;
-    unsigned int tid;
     unsigned long long func_addr;
     unsigned char is_entry;
-    unsigned long long rax;
-    unsigned long long rdi;
-    unsigned long long rsi;
-    unsigned long long rdx;
-    unsigned long long rcx;
-    unsigned long long r8;
-    unsigned long long r9;
 };
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
-    if (data_sz != sizeof(struct uprobe_event)) {
+    if (data_sz != sizeof(struct event)) {
         return 1;
     }
     
-    struct uprobe_event *e = (struct uprobe_event *)data;
+    struct event *e = (struct event *)data;
     const char *type = e->is_entry ? "entry" : "exit";
     
-    printf("{\"timestamp\":%llu,\"pid\":%u,\"type\":\"%s\",\"func\":\"0x%llx\",\"rdi\":%llu,\"rsi\":%llu,\"rax\":%llu}\n",
-           e->timestamp, e->pid, type, e->func_addr, e->rdi, e->rsi, e->rax);
+    printf("{\"timestamp\":%llu,\"func\":\"0x%llx\",\"type\":\"%s\"}\n",
+           e->timestamp, e->func_addr, type);
     fflush(stdout);
     return 0;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s <bpf_obj> <binary> <offset> [duration_secs]\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <bpf_obj> <binary> [duration_secs]\n", argv[0]);
         return 1;
     }
     
     const char *obj_file = argv[1];
     const char *binary = argv[2];
-    unsigned long offset = strtoul(argv[3], NULL, 0);
-    int duration = argc > 4 ? atoi(argv[4]) : 10;
+    const char *symbol = "process_data";
+    int duration = argc > 3 ? atoi(argv[3]) : 10;
     
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -70,12 +61,11 @@ int main(int argc, char *argv[]) {
     }
     
     struct bpf_program *prog;
-    int prog_count = 0;
     bpf_object__for_each_program(prog, obj) {
         const char *name = bpf_program__name(prog);
-        fprintf(stderr, "Attaching %s to %s:0x%lx\n", name, binary, offset);
-        bpf_program__attach_uprobe(prog, prog_count > 0, -1, binary, offset);
-        prog_count++;
+        bool is_return = (strstr(name, "exit") != NULL);
+        fprintf(stderr, "Attaching %s to %s:%s (%s)\n", name, binary, symbol, is_return ? "return" : "entry");
+        bpf_program__attach_uprobe(prog, is_return, -1, binary, 0);
     }
     
     struct bpf_map *uprobes_map = bpf_object__find_map_by_name(obj, "uprobes");
