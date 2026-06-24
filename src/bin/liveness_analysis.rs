@@ -1,22 +1,19 @@
 use capstone::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
-
-#[derive(Clone, Debug)]
-struct LivenessInfo {
-    location: String,
-    first_use: u64,
-    last_use: u64,
-    uses: Vec<u64>,
-}
+use std::io::Read;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let binary_path = "/tmp/test_uprobe";
-    let binary_data = fs::read(&binary_path)?;
+    let config = read_config("/tmp/analysis.cfg")?;
+    let binary_path = config.get("BINARY_PATH").unwrap_or(&"/tmp/test_uprobe".to_string()).clone();
+    let text_offset = parse_hex(config.get("TEXT_OFFSET").unwrap_or(&"0x1040".to_string()))?;
+    let text_size = parse_hex(config.get("TEXT_SIZE").unwrap_or(&"0x153".to_string()))?;
     
-    let text_start = 0x1040usize;
-    let text_size = 0x153usize;
-    let text_section = &binary_data[text_start..text_start + text_size];
+    let mut file = fs::File::open(&binary_path)?;
+    let mut binary_data = Vec::new();
+    file.read_to_end(&mut binary_data)?;
+    
+    let text_section = &binary_data[text_offset as usize..(text_offset as usize + text_size as usize)];
     
     let cs = Capstone::new()
         .x86()
@@ -24,84 +21,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .detail(true)
         .build()?;
     
-    let instructions = cs.disasm_all(text_section, 0x1040u64)?;
+    let instructions = cs.disasm_all(text_section, text_offset as u64)?;
     
-    let mut liveness: HashMap<String, LivenessInfo> = HashMap::new();
+    let mut reg_uses: HashMap<String, (u64, u64, usize)> = HashMap::new();
     
     for instr in instructions.iter() {
-        let addr = instr.address();
-        let mnem = instr.mnemonic().unwrap_or("");
         let op_str = instr.op_str().unwrap_or("");
+        let regs = ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp"];
         
-        let operands: Vec<&str> = op_str.split(',').map(|s| s.trim()).collect();
-        
-        for operand in operands.iter() {
-            if operand.contains("[rbp") {
-                let loc = operand.to_string();
-                liveness.entry(loc.clone())
-                    .and_modify(|info| {
-                        info.last_use = addr;
-                        info.uses.push(addr);
+        for reg in regs.iter() {
+            if op_str.contains(reg) {
+                reg_uses.entry(reg.to_string())
+                    .and_modify(|(_first, last, count)| {
+                        *last = instr.address();
+                        *count += 1;
                     })
-                    .or_insert_with(|| LivenessInfo {
-                        location: loc,
-                        first_use: addr,
-                        last_use: addr,
-                        uses: vec![addr],
-                    });
-            } else if operand.contains("edi") || operand.contains("eax") || operand.contains("rsi") {
-                let loc = operand.to_string();
-                liveness.entry(loc.clone())
-                    .and_modify(|info| {
-                        info.last_use = addr;
-                        info.uses.push(addr);
-                    })
-                    .or_insert_with(|| LivenessInfo {
-                        location: loc,
-                        first_use: addr,
-                        last_use: addr,
-                        uses: vec![addr],
-                    });
+                    .or_insert((instr.address(), instr.address(), 1));
             }
         }
     }
     
-    println!("=== VARIABLE LIVENESS ANALYSIS ===\n");
+    println!("=== LIVENESS ANALYSIS ===\n");
+    println!("Binary: {}", binary_path);
+    println!("Text section: 0x{:x}, {} bytes\n", text_offset, text_size);
     
-    println!("Live ranges (stack locations):");
-    let mut stack_vars: Vec<_> = liveness.iter()
-        .filter(|(k, _)| k.contains("[rbp"))
-        .collect();
-    stack_vars.sort_by_key(|a| a.1.first_use);
-    
-    for (loc, info) in stack_vars.iter() {
-        let span = info.last_use - info.first_use;
-        println!("  {}: 0x{:x} to 0x{:x} ({} bytes, {} uses)", 
-                 loc, info.first_use, info.last_use, span, info.uses.len());
-    }
-    println!();
-    
-    println!("Live ranges (registers):");
-    let mut regs: Vec<_> = liveness.iter()
-        .filter(|(k, _)| !k.contains("[rbp"))
-        .collect();
-    regs.sort_by_key(|a| a.1.first_use);
-    
-    for (reg, info) in regs.iter().take(10) {
-        let span = info.last_use - info.first_use;
-        println!("  {}: 0x{:x} to 0x{:x} ({} bytes, {} uses)", 
-                 reg, info.first_use, info.last_use, span, info.uses.len());
-    }
-    println!();
-    
-    println!("=== INFERRED VARIABLE LIFETIMES ===");
-    println!();
-    
-    for (loc, info) in stack_vars.iter() {
-        if info.uses.len() >= 2 {
-            println!("{}: lives from 0x{:x} to 0x{:x}", loc, info.first_use, info.last_use);
-        }
+    for (reg, (first, last, count)) in reg_uses.iter() {
+        let span = last - first;
+        println!("{}: {} uses, lives 0x{:x} to 0x{:x} ({} bytes)", reg, count, first, last, span);
     }
     
     Ok(())
+}
+
+fn read_config(path: &str) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
+    let mut config = HashMap::new();
+    if let Ok(content) = fs::read_to_string(path) {
+        for line in content.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                config.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    Ok(config)
+}
+
+fn parse_hex(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(u64::from_str_radix(s.trim_start_matches("0x"), 16)?)
 }
