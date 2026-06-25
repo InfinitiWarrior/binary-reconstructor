@@ -31,15 +31,12 @@ fi
 echo ".text: offset=$TEXT_OFFSET size=$TEXT_SIZE"
 echo
 
-cat > "$TMPDIR/config" << EOF
+mkdir -p /home/inf/.analysis
+cat > /home/inf/.analysis/config << EOF
 BINARY_PATH=$BINARY
 TEXT_OFFSET=$TEXT_OFFSET
 TEXT_SIZE=$TEXT_SIZE
 EOF
-
-export HOME="$TMPDIR"
-mkdir -p "$TMPDIR/.analysis"
-cp "$TMPDIR/config" "$TMPDIR/.analysis/config"
 
 echo "Generating pseudo-source..."
 /home/inf/.cargo_target/release/synthesize_source > "$TMPDIR/output.c" 2>/dev/null
