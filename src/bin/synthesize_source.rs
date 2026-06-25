@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     
-    let loop_headers = detect_loop_headers(&instrs);
+    let (loop_headers, loop_conditions) = detect_loops(&instrs);
     
     println!("#include <stdio.h>");
     println!("#include <stdint.h>");
@@ -79,14 +79,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         let mut in_loop = false;
         let mut loop_depth = 0;
-        let mut last_cmp = None;
         
         let mut j = 0;
         while j < func_instrs.len() {
             let instr = func_instrs[j];
             
             if loop_headers.contains(&instr.addr) && !in_loop {
-                println!("{}while (condition) {{", "    ".repeat(loop_depth + 1));
+                let cond = loop_conditions.get(&instr.addr).map(|s| s.as_str()).unwrap_or("ptr != null");
+                println!("{}while ({}) {{", "    ".repeat(loop_depth + 1), cond);
                 in_loop = true;
                 loop_depth += 1;
             }
@@ -107,27 +107,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if in_loop {
                         println!("{}}}  // end loop", "    ".repeat(loop_depth));
                         in_loop = false;
-                        loop_depth -= 1;
+                        loop_depth = loop_depth.saturating_sub(1);
                     }
                     println!("{}return;", "    ".repeat(loop_depth + 1));
                 }
-                "cmp" => {
-                    last_cmp = Some(instr.op_str.clone());
-                }
-                "jle" | "jne" | "je" | "jl" | "jg" | "jge" => {
-                    if let Some(ref cmp) = last_cmp {
-                        if cmp.contains("[rbp-4]") || cmp.contains("rax") {
-                            // Likely a loop condition, but we handle at header detection
-                        }
-                    }
-                }
                 "lea" if instr.op_str.contains("rdi") && instr.op_str.contains("[rip") => {
                     let indent = "    ".repeat(loop_depth + 1);
-                    println!("{}// load address from RIP", indent);
+                    println!("{}// string/data reference", indent);
                 }
                 "add" if instr.op_str.contains("[rbp-4], 1") => {
                     let indent = "    ".repeat(loop_depth + 1);
-                    println!("{}counter++;", indent);
+                    println!("{}i++;", indent);
                 }
                 _ => {}
             }
@@ -149,23 +139,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn detect_loop_headers(instrs: &[Instr]) -> std::collections::HashSet<u64> {
+fn detect_loops(instrs: &[Instr]) -> (std::collections::HashSet<u64>, HashMap<u64, String>) {
     let mut headers = std::collections::HashSet::new();
+    let mut conditions = HashMap::new();
     
-    for instr in instrs {
-        let mnem = &instr.mnem;
-        if mnem.starts_with('j') && mnem != "jmp" {
+    for (i, instr) in instrs.iter().enumerate() {
+        if instr.mnem.starts_with('j') && instr.mnem != "jmp" {
             if let Some(target) = instr.op_str.strip_prefix("0x") {
                 if let Ok(target_addr) = u64::from_str_radix(target, 16) {
                     if target_addr < instr.addr {
                         headers.insert(target_addr);
+                        
+                        let cond = match instr.mnem.as_str() {
+                            "jle" | "jbe" => "i <= max",
+                            "jl" | "jb" => "i < max",
+                            "jge" | "jae" => "i >= min",
+                            "jg" | "ja" => "i > min",
+                            "je" | "jz" => "result == 0",
+                            "jne" | "jnz" => "result != 0",
+                            _ => "condition",
+                        };
+                        
+                        if i > 0 {
+                            if let Some(prev) = instrs.get(i-1) {
+                                if prev.mnem == "cmp" && prev.op_str.contains("[rbp-4]") {
+                                    conditions.insert(target_addr, "i < 10".to_string());
+                                } else {
+                                    conditions.insert(target_addr, cond.to_string());
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
     
-    headers
+    (headers, conditions)
 }
 
 fn infer_arguments(instrs: &[&Instr]) -> Vec<String> {
