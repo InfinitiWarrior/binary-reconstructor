@@ -54,3 +54,11 @@ head -50 "$TMPDIR/output.c"
 cp "$TMPDIR/output.c" "reconstructed_$(basename $BINARY).c"
 echo
 echo "Full output: reconstructed_$(basename $BINARY).c"
+
+echo
+echo "=== EXECUTABLE VERIFICATION ==="
+gcc "$TMPDIR/output.c" -o "$TMPDIR/test_executable" 2>/dev/null && {
+    "$TMPDIR/test_executable"
+    EXIT_CODE=$?
+    echo "Reconstructed binary executed: exit code $EXIT_CODE"
+} || echo "Compilation failed"
