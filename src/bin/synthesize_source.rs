@@ -1,5 +1,5 @@
 use capstone::prelude::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 
@@ -62,86 +62,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|instr| instr.addr >= *func_addr && instr.addr < next_func)
             .collect();
         
-        if func_instrs.is_empty() {
+        if func_instrs.is_empty() || func_instrs.len() < 2 {
             continue;
         }
         
-        println!("void func_0x{:x}(void) {{", func_addr);
+        let args = infer_arguments(&func_instrs);
+        let sig = if args.is_empty() {
+            format!("void func_0x{:x}(void)", func_addr)
+        } else {
+            format!("void func_0x{:x}({})", func_addr, args.join(", "))
+        };
         
-        let mut var_map = HashMap::new();
-        var_map.insert("[rbp-4]".to_string(), "counter".to_string());
-        var_map.insert("[rbp-8]".to_string(), "temp".to_string());
-        var_map.insert("[rbp-16]".to_string(), "buffer".to_string());
+        println!("{} {{", sig);
+        
+        let mut last_was_mov_rdi = false;
+        let mut last_mov_rdi_arg = String::new();
         
         let mut i = 0;
         while i < func_instrs.len() {
             let instr = func_instrs[i];
             
-            // Pattern: mov [rbp-X], 0; add [rbp-X], 1 (loop init + increment)
-            if instr.mnem == "mov" && instr.op_str.contains("[rbp-") && instr.op_str.contains("0x0") {
-                if let Some(var) = extract_stack_var(&instr.op_str) {
-                    if i + 2 < func_instrs.len() {
-                        let next = func_instrs[i + 1];
-                        if next.mnem == "add" && next.op_str.contains(&var) && next.op_str.contains("1") {
-                            println!("    int {} = 0;", var);
-                            var_map.insert(var.clone(), format!("i ({})", var));
-                            i += 2;
-                            continue;
-                        }
+            // Pattern: mov rdi, X; call
+            if instr.mnem == "mov" && instr.op_str.starts_with("rdi,") {
+                last_was_mov_rdi = true;
+                last_mov_rdi_arg = instr.op_str.split(',').nth(1).unwrap_or("").trim().to_string();
+                i += 1;
+                continue;
+            }
+            
+            if instr.mnem == "call" {
+                if last_was_mov_rdi {
+                    if let Some(target) = instr.op_str.strip_prefix("0x") {
+                        println!("    func_0x{}({});", target, last_mov_rdi_arg);
                     }
-                }
-            }
-            
-            // Pattern: lea rdi, [rip+XXX]; call (string reference)
-            if instr.mnem == "lea" && instr.op_str.contains("rdi") && instr.op_str.contains("[rip") {
-                if i + 1 < func_instrs.len() && func_instrs[i + 1].mnem == "call" {
-                    println!("    // string reference");
-                    i += 1;
-                    continue;
-                }
-            }
-            
-            // Pattern: mov rdi, ...; call (function argument)
-            if instr.mnem == "mov" && instr.op_str.starts_with("rdi") {
-                if i + 1 < func_instrs.len() && func_instrs[i + 1].mnem == "call" {
-                    let arg = instr.op_str.split(',').nth(1).unwrap_or("").trim();
-                    println!("    func_call({});", arg);
-                    i += 1;
-                    continue;
-                }
-            }
-            
-            match instr.mnem.as_str() {
-                "call" => {
+                    last_was_mov_rdi = false;
+                } else {
                     if let Some(target) = instr.op_str.strip_prefix("0x") {
                         println!("    func_0x{}();", target);
                     }
                 }
-                "ret" => {
-                    println!("    return;");
-                }
-                "cmp" => {
-                    if instr.op_str.contains("[rbp-4]") {
-                        println!("    // loop condition");
-                    }
-                }
-                "add" => {
-                    if instr.op_str.contains("[rbp-4], 1") {
-                        println!("    counter++;");
-                    } else {
-                        println!("    // arithmetic");
-                    }
-                }
-                "mov" if instr.op_str.contains("[rbp-") => {
-                    if let Some(var) = extract_stack_var(&instr.op_str) {
-                        if let Some(mapped) = var_map.get(&var) {
-                            println!("    {} = ...;", mapped);
-                        } else {
-                            println!("    var_{} = ...;", var.replace("[rbp-", "").replace("]", ""));
-                        }
-                    }
-                }
-                _ => {}
+            } else if instr.mnem == "ret" {
+                println!("    return;");
+            } else if instr.mnem == "lea" && instr.op_str.contains("rdi") && instr.op_str.contains("[rip") {
+                println!("    // load string/data");
+            } else if instr.mnem == "add" && instr.op_str.contains("[rbp-4], 1") {
+                println!("    counter++;");
+            } else if instr.mnem == "cmp" && instr.op_str.contains("[rbp") {
+                println!("    // condition check");
             }
             
             i += 1;
@@ -157,13 +124,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn extract_stack_var(op_str: &str) -> Option<String> {
-    if let Some(start) = op_str.find("[rbp-") {
-        if let Some(end) = op_str[start..].find(']') {
-            return Some(op_str[start..start+end+1].to_string());
+fn infer_arguments(instrs: &[&Instr]) -> Vec<String> {
+    let mut args = Vec::new();
+    let arg_regs = vec!["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+    
+    for reg in arg_regs {
+        for instr in instrs {
+            if (instr.mnem == "mov" || instr.mnem == "lea") && instr.op_str.starts_with(reg) {
+                args.push(format!("uint64_t arg_{}", reg));
+                break;
+            }
         }
     }
-    None
+    
+    args
 }
 
 fn read_config(path: &str) -> Result<HashMap<String, String>, Box<dyn std::error::Error>> {
