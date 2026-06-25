@@ -40,6 +40,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     
+    let loop_headers = detect_loop_headers(&instrs);
+    
     println!("#include <stdio.h>");
     println!("#include <stdint.h>");
     println!("#include <string.h>\n");
@@ -75,43 +77,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         println!("{} {{", sig);
         
-        let mut last_was_mov_rdi = false;
-        let mut last_mov_rdi_arg = String::new();
+        let mut in_loop = false;
+        let mut loop_depth = 0;
+        let mut last_cmp = None;
         
-        let mut i = 0;
-        while i < func_instrs.len() {
-            let instr = func_instrs[i];
+        let mut j = 0;
+        while j < func_instrs.len() {
+            let instr = func_instrs[j];
             
-            // Pattern: mov rdi, X; call
-            if instr.mnem == "mov" && instr.op_str.starts_with("rdi,") {
-                last_was_mov_rdi = true;
-                last_mov_rdi_arg = instr.op_str.split(',').nth(1).unwrap_or("").trim().to_string();
-                i += 1;
-                continue;
+            if loop_headers.contains(&instr.addr) && !in_loop {
+                println!("{}while (condition) {{", "    ".repeat(loop_depth + 1));
+                in_loop = true;
+                loop_depth += 1;
             }
             
-            if instr.mnem == "call" {
-                if last_was_mov_rdi {
+            match instr.mnem.as_str() {
+                "call" => {
+                    let indent = "    ".repeat(loop_depth + 1);
                     if let Some(target) = instr.op_str.strip_prefix("0x") {
-                        println!("    func_0x{}({});", target, last_mov_rdi_arg);
-                    }
-                    last_was_mov_rdi = false;
-                } else {
-                    if let Some(target) = instr.op_str.strip_prefix("0x") {
-                        println!("    func_0x{}();", target);
+                        if j > 0 && func_instrs[j-1].mnem == "mov" && func_instrs[j-1].op_str.starts_with("rdi") {
+                            let arg = func_instrs[j-1].op_str.split(',').nth(1).unwrap_or("").trim();
+                            println!("{}func_0x{}({});", indent, target, arg);
+                        } else {
+                            println!("{}func_0x{}();", indent, target);
+                        }
                     }
                 }
-            } else if instr.mnem == "ret" {
-                println!("    return;");
-            } else if instr.mnem == "lea" && instr.op_str.contains("rdi") && instr.op_str.contains("[rip") {
-                println!("    // load string/data");
-            } else if instr.mnem == "add" && instr.op_str.contains("[rbp-4], 1") {
-                println!("    counter++;");
-            } else if instr.mnem == "cmp" && instr.op_str.contains("[rbp") {
-                println!("    // condition check");
+                "ret" => {
+                    if in_loop {
+                        println!("{}}}  // end loop", "    ".repeat(loop_depth));
+                        in_loop = false;
+                        loop_depth -= 1;
+                    }
+                    println!("{}return;", "    ".repeat(loop_depth + 1));
+                }
+                "cmp" => {
+                    last_cmp = Some(instr.op_str.clone());
+                }
+                "jle" | "jne" | "je" | "jl" | "jg" | "jge" => {
+                    if let Some(ref cmp) = last_cmp {
+                        if cmp.contains("[rbp-4]") || cmp.contains("rax") {
+                            // Likely a loop condition, but we handle at header detection
+                        }
+                    }
+                }
+                "lea" if instr.op_str.contains("rdi") && instr.op_str.contains("[rip") => {
+                    let indent = "    ".repeat(loop_depth + 1);
+                    println!("{}// load address from RIP", indent);
+                }
+                "add" if instr.op_str.contains("[rbp-4], 1") => {
+                    let indent = "    ".repeat(loop_depth + 1);
+                    println!("{}counter++;", indent);
+                }
+                _ => {}
             }
             
-            i += 1;
+            j += 1;
+        }
+        
+        if in_loop {
+            println!("{}}}  // end loop", "    ".repeat(loop_depth));
         }
         
         println!("}}\n");
@@ -122,6 +147,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("}}");
     
     Ok(())
+}
+
+fn detect_loop_headers(instrs: &[Instr]) -> std::collections::HashSet<u64> {
+    let mut headers = std::collections::HashSet::new();
+    
+    for instr in instrs {
+        let mnem = &instr.mnem;
+        if mnem.starts_with('j') && mnem != "jmp" {
+            if let Some(target) = instr.op_str.strip_prefix("0x") {
+                if let Ok(target_addr) = u64::from_str_radix(target, 16) {
+                    if target_addr < instr.addr {
+                        headers.insert(target_addr);
+                    }
+                }
+            }
+        }
+    }
+    
+    headers
 }
 
 fn infer_arguments(instrs: &[&Instr]) -> Vec<String> {
