@@ -10,12 +10,17 @@ struct Instr {
     op_str: String,
 }
 
+#[derive(Clone, Debug)]
+struct FuncSig {
+    args: Vec<String>,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = "/home/inf/.analysis/config";
     let config = read_config(config_path)?;
-    let binary_path = config.get("BINARY_PATH").unwrap_or(&"/bin/ls".to_string()).clone();
-    let text_offset = parse_hex(config.get("TEXT_OFFSET").unwrap_or(&"0x3040".to_string()))?;
-    let text_size = parse_hex(config.get("TEXT_SIZE").unwrap_or(&"0x19863".to_string()))?;
+    let binary_path = config.get("BINARY_PATH").unwrap_or(&"/bin/md5sum".to_string()).clone();
+    let text_offset = parse_hex(config.get("TEXT_OFFSET").unwrap_or(&"0x2040".to_string()))?;
+    let text_size = parse_hex(config.get("TEXT_SIZE").unwrap_or(&"0x6693".to_string()))?;
     
     let mut file = fs::File::open(&binary_path)?;
     let mut binary_data = Vec::new();
@@ -42,16 +47,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let (loop_headers, loop_conditions) = detect_loops(&instrs);
     
-    println!("#include <stdio.h>");
-    println!("#include <stdint.h>");
-    println!("#include <string.h>\n");
-    
     let mut func_addrs = Vec::new();
     for instr in instrs.iter() {
         if instr.mnem == "endbr64" {
             func_addrs.push(instr.addr);
         }
     }
+    
+    let mut func_sigs = HashMap::new();
+    for (i, func_addr) in func_addrs.iter().enumerate() {
+        let next_func = if i + 1 < func_addrs.len() {
+            func_addrs[i + 1]
+        } else {
+            text_offset + text_size
+        };
+        
+        let func_instrs: Vec<&Instr> = instrs.iter()
+            .filter(|instr| instr.addr >= *func_addr && instr.addr < next_func)
+            .collect();
+        
+        let args = infer_arguments(&func_instrs);
+        func_sigs.insert(*func_addr, FuncSig { args });
+    }
+    
+    println!("#include <stdio.h>");
+    println!("#include <stdint.h>");
+    println!("#include <string.h>\n");
+    
+    println!("// Forward declarations");
+    for addr in func_addrs.iter() {
+        if let Some(sig) = func_sigs.get(addr) {
+            if sig.args.is_empty() {
+                println!("void func_0x{:x}(void);", addr);
+            } else {
+                println!("void func_0x{:x}({});", addr, sig.args.join(", "));
+            }
+        }
+    }
+    println!();
     
     for (i, func_addr) in func_addrs.iter().enumerate() {
         let next_func = if i + 1 < func_addrs.len() {
@@ -68,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         
-        let args = infer_arguments(&func_instrs);
+        let args = &func_sigs.get(func_addr).unwrap().args;
         let sig = if args.is_empty() {
             format!("void func_0x{:x}(void)", func_addr)
         } else {
@@ -76,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         
         println!("{} {{", sig);
+        println!("    int i = 0, result = 0, max = 0, min = 0;");
         
         let mut in_loop = false;
         let mut loop_depth = 0;
@@ -85,7 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let instr = func_instrs[j];
             
             if loop_headers.contains(&instr.addr) && !in_loop {
-                let cond = loop_conditions.get(&instr.addr).map(|s| s.as_str()).unwrap_or("ptr != null");
+                let cond = loop_conditions.get(&instr.addr).map(|s| s.as_str()).unwrap_or("1");
                 println!("{}while ({}) {{", "    ".repeat(loop_depth + 1), cond);
                 in_loop = true;
                 loop_depth += 1;
@@ -95,11 +129,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "call" => {
                     let indent = "    ".repeat(loop_depth + 1);
                     if let Some(target) = instr.op_str.strip_prefix("0x") {
-                        if j > 0 && func_instrs[j-1].mnem == "mov" && func_instrs[j-1].op_str.starts_with("rdi") {
-                            let arg = func_instrs[j-1].op_str.split(',').nth(1).unwrap_or("").trim();
-                            println!("{}func_0x{}({});", indent, target, arg);
-                        } else {
-                            println!("{}func_0x{}();", indent, target);
+                        if let Ok(target_addr) = u64::from_str_radix(target, 16) {
+                            if let Some(target_sig) = func_sigs.get(&target_addr) {
+                                if target_sig.args.is_empty() {
+                                    println!("{}func_0x{}();", indent, target);
+                                } else {
+                                    let arg_list = vec!["0"; target_sig.args.len()].join(", ");
+                                    println!("{}func_0x{}({});", indent, target, arg_list);
+                                }
+                            }
                         }
                     }
                 }
@@ -113,11 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 "lea" if instr.op_str.contains("rdi") && instr.op_str.contains("[rip") => {
                     let indent = "    ".repeat(loop_depth + 1);
-                    println!("{}// string/data reference", indent);
-                }
-                "add" if instr.op_str.contains("[rbp-4], 1") => {
-                    let indent = "    ".repeat(loop_depth + 1);
-                    println!("{}i++;", indent);
+                    println!("{}// data reference", indent);
                 }
                 _ => {}
             }
@@ -143,7 +177,7 @@ fn detect_loops(instrs: &[Instr]) -> (std::collections::HashSet<u64>, HashMap<u6
     let mut headers = std::collections::HashSet::new();
     let mut conditions = HashMap::new();
     
-    for (i, instr) in instrs.iter().enumerate() {
+    for instr in instrs {
         if instr.mnem.starts_with('j') && instr.mnem != "jmp" {
             if let Some(target) = instr.op_str.strip_prefix("0x") {
                 if let Ok(target_addr) = u64::from_str_radix(target, 16) {
@@ -160,15 +194,7 @@ fn detect_loops(instrs: &[Instr]) -> (std::collections::HashSet<u64>, HashMap<u6
                             _ => "condition",
                         };
                         
-                        if i > 0 {
-                            if let Some(prev) = instrs.get(i-1) {
-                                if prev.mnem == "cmp" && prev.op_str.contains("[rbp-4]") {
-                                    conditions.insert(target_addr, "i < 10".to_string());
-                                } else {
-                                    conditions.insert(target_addr, cond.to_string());
-                                }
-                            }
-                        }
+                        conditions.insert(target_addr, cond.to_string());
                     }
                 }
             }
