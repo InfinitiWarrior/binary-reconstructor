@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     
     let instructions = cs.disasm_all(text_section, text_offset as u64)?;
+    
     println!("#include <stdio.h>\n");
     
     let mut func_addrs = Vec::new();
@@ -34,11 +35,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     for func_addr in func_addrs.iter() {
         println!("void func_0x{:x}() {{", func_addr);
-        println!("    // implementation");
-        println!("}}");
+        
+        let indent = "    ";
+        
+        for instr in instructions.iter() {
+            let addr = instr.address();
+            if addr < *func_addr || addr >= *func_addr + 500 {
+                continue;
+            }
+            
+            let mnem = instr.mnemonic().unwrap_or("");
+            let op_str = instr.op_str().unwrap_or("");
+            
+            match mnem {
+                "call" => {
+                    if let Some(target) = op_str.strip_prefix("0x") {
+                        println!("{}func_0x{}();", indent, target);
+                    } else {
+                        println!("{}call_helper();", indent);
+                    }
+                }
+                "ret" => {
+                    println!("{}return;", indent);
+                }
+                "add" => {
+                    if op_str.contains("[rbp-4], 1") {
+                        println!("{}i++;", indent);
+                    }
+                }
+                "mov" if op_str.contains("[rbp-4], 0") => {
+                    println!("{}int i = 0;", indent);
+                }
+                _ => {}
+            }
+        }
+        
+        println!("}}\n");
     }
     
-    println!("\nint main(int argc, char *argv[]) {{");
+    println!("int main() {{");
     println!("    return 0;");
     println!("}}");
     
