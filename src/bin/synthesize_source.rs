@@ -24,7 +24,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let instructions = cs.disasm_all(text_section, text_offset as u64)?;
     
-    println!("#include <stdio.h>\n");
+    println!("#include <stdio.h>");
+    println!("#include <stdint.h>");
+    println!("#include <string.h>\n");
     
     let mut func_addrs = Vec::new();
     for instr in instructions.iter() {
@@ -33,14 +35,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
-    for func_addr in func_addrs.iter() {
-        println!("void func_0x{:x}() {{", func_addr);
+    for (i, func_addr) in func_addrs.iter().enumerate() {
+        let next_func = if i + 1 < func_addrs.len() {
+            func_addrs[i + 1]
+        } else {
+            text_offset + text_size
+        };
         
-        let indent = "    ";
+        println!("// Function at 0x{:x}", func_addr);
+        println!("void func_0x{:x}(void) {{", func_addr);
+        
+        let mut has_stack = false;
+        let mut max_stack_offset = 0i32;
         
         for instr in instructions.iter() {
             let addr = instr.address();
-            if addr < *func_addr || addr >= *func_addr + 500 {
+            if addr < *func_addr || addr >= next_func {
+                continue;
+            }
+            
+            let op_str = instr.op_str().unwrap_or("");
+            if op_str.contains("[rbp-") {
+                has_stack = true;
+                if let Some(offset_str) = op_str.split("[rbp-").nth(1) {
+                    if let Some(num_str) = offset_str.split(']').next() {
+                        if let Ok(offset) = num_str.parse::<i32>() {
+                            if offset > max_stack_offset {
+                                max_stack_offset = offset;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if has_stack {
+            println!("    uint8_t local_vars[{}];", (max_stack_offset + 8).max(64));
+        }
+        
+        for instr in instructions.iter() {
+            let addr = instr.address();
+            if addr < *func_addr || addr >= next_func {
                 continue;
             }
             
@@ -50,21 +85,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match mnem {
                 "call" => {
                     if let Some(target) = op_str.strip_prefix("0x") {
-                        println!("{}func_0x{}();", indent, target);
+                        println!("    func_0x{}();", target);
                     } else {
-                        println!("{}call_helper();", indent);
+                        println!("    // call");
                     }
                 }
                 "ret" => {
-                    println!("{}return;", indent);
+                    println!("    return;");
                 }
-                "add" => {
-                    if op_str.contains("[rbp-4], 1") {
-                        println!("{}i++;", indent);
+                "cmp" => {
+                    if op_str.contains("[rbp-4]") && op_str.contains("0x5") {
+                        println!("    // loop condition check");
                     }
                 }
-                "mov" if op_str.contains("[rbp-4], 0") => {
-                    println!("{}int i = 0;", indent);
+                "lea" => {
+                    if op_str.contains("rdi, [rip") {
+                        println!("    // load address");
+                    }
+                }
+                "mov" if op_str.contains("byte ptr") || op_str.contains("dword ptr") || op_str.contains("qword ptr") => {
+                    println!("    // memory operation");
                 }
                 _ => {}
             }
@@ -73,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("}}\n");
     }
     
-    println!("int main() {{");
+    println!("int main(int argc, char *argv[]) {{");
     println!("    return 0;");
     println!("}}");
     
