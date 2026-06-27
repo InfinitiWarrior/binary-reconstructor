@@ -1,9 +1,15 @@
 [package]
 name = "binary-reconstructor"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+
+[[bin]]
+name = "reconstructor"
+path = "src/main.rs"
 
 [dependencies]
 goblin = "0.8"
+capstone = "0.12"
 
-[build-dependencies]
+[profile.release]
+opt-level = 3

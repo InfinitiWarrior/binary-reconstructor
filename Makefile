@@ -1,48 +1,43 @@
-.PHONY: build clean test reconstruct compile run help
+.PHONY: all build release run clean test poc
 
-BINARY ?= /usr/bin/cat
-OUTPUT_DIR := /tmp
-OUTPUT_NAME := $(notdir $(BINARY))_reconstructed
-RECONSTRUCTOR := ./target/release/binary-reconstructor
+BINARY     := target/release/reconstructor
+DEBUG_BIN  := target/debug/reconstructor
+BIN        ?= /usr/bin/md5sum
+CARGO_ENV  := TMPDIR=/dev/shm/cargo
 
-help:
-	@echo "Usage: make reconstruct BINARY=/path/to/binary"
-	@echo "       make compile BINARY=/path/to/binary"
-	@echo "       make run BINARY=/path/to/binary"
-	@echo ""
-	@echo "Examples:"
-	@echo "  make reconstruct BINARY=/usr/bin/cat"
-	@echo "  make reconstruct BINARY=/usr/bin/dolphin"
-	@echo "  make reconstruct BINARY=/usr/bin/nmap"
+all: build
 
 build:
-	TMPDIR=/dev/shm/cargo cargo build --release
+	$(CARGO_ENV) cargo build
+
+release:
+	$(CARGO_ENV) cargo build --release
+
+run: build
+	$(DEBUG_BIN) $(BIN) 2>analysis.log
+	@echo ""
+	@echo "=== Analysis log ==="
+	@cat analysis.log
+
+poc: release
+	@echo "=== Binary Reconstructor PoC ==="
+	@echo "Target: $(BIN)"
+	@echo ""
+	$(BINARY) $(BIN) 2>analysis.log | tee reconstructed.c | \
+		grep -E "void fn_|MD5|SSL|connect|fwrite|setlocale|dcgettext|malloc|calloc|fopen|socket" | head -40
+	@echo ""
+	@echo "=== Analysis Summary ==="
+	@cat analysis.log
+	@echo ""
+	@echo "=== Output saved to reconstructed.c ==="
+	@wc -l reconstructed.c
 
 clean:
-	rm -f /tmp/$(OUTPUT_NAME)*
-	rm -rf /tmp/test_* /tmp/dolphin_* /tmp/reconstructed_*
+	cargo clean
+	rm -f reconstructed.c analysis.log
 
-reconstruct: build
-	@echo "Reconstructing $(BINARY)..."
-	@$(RECONSTRUCTOR) $(BINARY) 2>/dev/null > /tmp/$(OUTPUT_NAME).cpp
-	@echo "Generated: /tmp/$(OUTPUT_NAME).cpp"
-
-compile: reconstruct
-	@echo "Compiling..."
-	@file /tmp/$(OUTPUT_NAME).cpp | grep -q "C\+\+ source" && \
-		g++ /tmp/$(OUTPUT_NAME).cpp -o /tmp/$(OUTPUT_NAME) $$(pkg-config --cflags --libs Qt5Core Qt5Gui Qt5Widgets) 2>&1 && echo "✓ Compiled C++" || echo "Compile failed" || \
-		rustc /tmp/$(OUTPUT_NAME).cpp -o /tmp/$(OUTPUT_NAME) 2>&1 && echo "✓ Compiled Rust" || echo "Compile failed"
-
-run: compile
-	@echo "Running $(OUTPUT_NAME)..."
-	@/tmp/$(OUTPUT_NAME)
-
-test-all: build
-	@echo "=== Testing cat ==="
-	@$(RECONSTRUCTOR) /usr/bin/cat 2>&1 | grep Type
-	@echo "=== Testing nmap ==="
-	@$(RECONSTRUCTOR) /usr/bin/nmap 2>&1 | grep Type
-	@echo "=== Testing dolphin ==="
-	@$(RECONSTRUCTOR) /usr/bin/dolphin 2>&1 | grep Type
-	@echo "=== Testing grep ==="
-	@$(RECONSTRUCTOR) /usr/bin/grep 2>&1 | grep Type
+test: build
+	@echo "--- md5sum ---"
+	$(DEBUG_BIN) /usr/bin/md5sum 2>/dev/null | grep -cE "void fn_" || true
+	@echo "functions found"
+	$(DEBUG_BIN) /usr/bin/md5sum 2>/dev/null | grep -E "MD5_Init|MD5_Update|MD5_Final" | head -5
