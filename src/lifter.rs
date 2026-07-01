@@ -7,9 +7,6 @@ pub struct Lifter {
     next_var: usize,
     reg_map: HashMap<u32, Var>,
     pub last_cmp: Option<CmpState>,
-    /// Tracks registers that were loaded from a known GOT slot.
-    /// When "mov rax, [rip+got_slot]" is seen and got_slot resolves to a symbol,
-    /// we record rax -> symbol_name so "call rax" can resolve it.
     got_reg_map: HashMap<u32, String>,
 }
 
@@ -51,7 +48,6 @@ impl Lifter {
         self.last_cmp.as_ref()
     }
 
-    /// Lift an owned InsnInfo into IR statements.
     pub fn lift_insn_owned(
         &mut self,
         insn: &InsnInfo,
@@ -60,13 +56,9 @@ impl Lifter {
     ) -> Vec<Stmt> {
         let ops = &insn.operands;
         match insn.mnemonic.as_str() {
-            // ---- Data movement ----
             "mov" | "movabs" | "movzx" | "movsx" | "movsxd" => {
                 if ops.len() < 2 { return vec![]; }
-                // Check if this is a GOT load: mov reg, [rip+N]
-                // If so, record the dest register -> import name for call resolution.
                 if let OwnedOperand::Mem { base, disp, .. } = &ops[1] {
-                    // RIP-relative: capstone sets base = X86_REG_RIP (41), not 0.
                     if *base == 41 {
                         let got_slot = (insn.address + insn.bytes_len as u64).wrapping_add(*disp as u64);
                         if let Some(sym) = imports.get(&got_slot) {
@@ -82,7 +74,6 @@ impl Lifter {
 
             "lea" => {
                 if ops.len() < 2 { return vec![]; }
-                // If RIP-relative and address is in .rodata, emit string literal.
                 if let OwnedOperand::Mem { base, disp, .. } = &ops[1] {
                     if *base == 41 { // X86_REG_RIP
                         let str_addr = (insn.address + insn.bytes_len as u64)
@@ -165,22 +156,15 @@ impl Lifter {
             // ---- Calls ----
             "call" => {
                 let target = if let Some(addr) = insn.imm_target {
-                    // Direct call: target is an immediate address.
                     imports.get(&addr).cloned().unwrap_or_else(|| format!("fn_{:#x}", addr))
                 } else if let Some(OwnedOperand::Mem { base, disp, .. }) = ops.first() {
-                    // call [rip + N] or call [reg + N]: GOT-indirect call (-fno-plt style).
-                    // Compute the GOT slot address: for RIP-relative, base is RIP (0 in capstone
-                    // memory operands means RIP for RIP-relative), disp is the offset.
-                    // The actual GOT slot VA = insn.address + insn.bytes_len + disp.
-                    let got_slot = if *base == 41 { // X86_REG_RIP
-                        // RIP-relative: capstone sets base=X86_REG_RIP(41)
+                    let got_slot = if *base == 41 {
                         (insn.address + insn.bytes_len as u64).wrapping_add(*disp as u64)
                     } else {
-                        *disp as u64 // absolute or register-relative: use disp as hint
+                        *disp as u64
                     };
                     imports.get(&got_slot).cloned().unwrap_or_else(|| format!("got_{:#x}", got_slot))
                 } else if let Some(OwnedOperand::Reg(r)) = ops.first() {
-                    // Check if this register was loaded from a known GOT slot.
                     if let Some(sym) = self.got_reg_map.get(r).cloned() {
                         let args = self.abi_args();
                         let dest = self.write_reg(X86Reg::X86_REG_RAX as u32);
@@ -210,8 +194,6 @@ impl Lifter {
         }
     }
 
-    // ---- Helpers ----
-
     fn binop(&mut self, ops: &[OwnedOperand], op: BinOp) -> Vec<Stmt> {
         if ops.len() < 2 { return vec![]; }
         let left = self.read_op(&ops[0]);
@@ -225,8 +207,6 @@ impl Lifter {
             OwnedOperand::Reg(r) => self.read_reg(*r),
             OwnedOperand::Imm(i) => Operand::Const(*i),
             OwnedOperand::Mem { base, disp, .. } => {
-                // Emit an implicit load; return a fresh var representing the value.
-                // Full treatment requires threading Vec<Stmt> through here.
                 let _base_op = self.read_reg(*base);
                 let dest = self.fresh();
                 Operand::Var(dest)
@@ -260,8 +240,6 @@ impl Lifter {
             OwnedOperand::Mem { base, disp, .. } => {
                 let base_op = self.read_reg(*base);
                 if *disp != 0 {
-                    // Ideally emit a BinOp Add here; for now return base.
-                    // Consumers use the disp field on Load/Store directly.
                     base_op
                 } else {
                     base_op
