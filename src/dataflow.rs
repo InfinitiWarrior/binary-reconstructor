@@ -1,46 +1,19 @@
-/// Dataflow analysis pass
-///
-/// Input: a lifted Function (SSA IR with explicit basic blocks)
-/// Output: resolved call sites with concrete argument information
-///
-/// This is the core of semantic extraction. For each Call node in the IR,
-/// we walk backwards through use-def chains to find what values actually
-/// flow into the argument registers at the call site.
-///
-/// What we can resolve here:
-///   - String literal arguments (arg = address in .rodata)
-///   - Integer constants (arg = immediate value)
-///   - Return values from prior calls (arg = result of malloc, fopen, etc.)
-///   - Struct field loads (arg = load from known base + offset)
-///
-/// What we can't resolve without symbolic execution:
-///   - Values computed through complex arithmetic
-///   - Values read from stdin/environment at runtime
-///   - Pointer targets that depend on runtime heap layout
-
 use std::collections::HashMap;
 use crate::ir::{Function, Stmt, Operand};
-/// A resolved call site: we know who is being called and what the arguments
-/// concretely are (as best as static analysis can determine).
+
 #[derive(Debug, Clone)]
 pub struct ResolvedCall {
     pub block_id: usize,
     pub target: String,
-    /// Each argument: either resolved to a concrete value or left as a Var reference.
     pub args: Vec<ResolvedArg>,
 }
 
 #[derive(Debug, Clone)]
 pub enum ResolvedArg {
-    /// A known integer constant.
     Const(i64),
-    /// A string from the binary's read-only data section.
     StringLiteral(String),
-    /// The return value of a prior call (e.g., malloc return used as buffer).
     CallResult(String),
-    /// A load from a struct at a known offset (struct field access pattern).
     FieldLoad { base_call: String, offset: i64 },
-    /// Unresolved: we traced it but couldn't recover concrete meaning.
     Unknown(String),
 }
 
@@ -57,13 +30,10 @@ impl std::fmt::Display for ResolvedArg {
     }
 }
 
-/// Build a map from Var -> the Stmt that defined it, across all blocks.
-/// In proper SSA this is trivial (one definition per variable).
 fn build_def_map(func: &Function) -> HashMap<usize, Stmt> {
     let mut def_map: HashMap<usize, Stmt> = HashMap::new();
     for block in &func.blocks {
         for stmt in &block.stmts {
-            // Extract the defined variable from each statement type.
             let defined_var = match stmt {
                 Stmt::BinOp { dest, .. }      => Some(dest.0),
                 Stmt::Load { dest, .. }        => Some(dest.0),
@@ -81,9 +51,6 @@ fn build_def_map(func: &Function) -> HashMap<usize, Stmt> {
     def_map
 }
 
-/// Trace an operand backwards through use-def chains to find its concrete value.
-/// `rodata` maps virtual addresses to string content (extracted from the binary's .rodata section).
-/// `depth` limits recursion to prevent cycles (shouldn't exist in SSA, but be safe).
 fn trace_operand(
     op: &Operand,
     def_map: &HashMap<usize, Stmt>,
@@ -98,9 +65,6 @@ fn trace_operand(
         Operand::Const(n) => ResolvedArg::Const(*n),
 
         Operand::Symbol(name, offset) => {
-            // If the symbol is in rodata, it's a string literal.
-            // (In practice, symbol addresses are resolved by the ELF parser;
-            // here we treat the name itself as the key.)
             ResolvedArg::StringLiteral(name.clone())
         }
 
@@ -128,10 +92,8 @@ fn trace_operand(
                 }
 
                 Some(Stmt::BinOp { op: binop, left, right, .. }) => {
-                    // If it's an add with a constant (address + offset pattern), trace through.
                     let left_res = trace_operand(left, def_map, rodata, depth + 1);
                     let right_res = trace_operand(right, def_map, rodata, depth + 1);
-                    // Simplification: if one side is a const 0, return the other.
                     match (&left_res, &right_res) {
                         (ResolvedArg::Const(0), _) => right_res,
                         (_, ResolvedArg::Const(0)) => left_res,
@@ -140,8 +102,6 @@ fn trace_operand(
                 }
 
                 Some(Stmt::Phi { choices, .. }) => {
-                    // At a join point, we can only say "one of these values".
-                    // For now, trace the first choice and note it's a phi.
                     if let Some((_, op)) = choices.first() {
                         trace_operand(op, def_map, rodata, depth + 1)
                     } else {
@@ -155,7 +115,7 @@ fn trace_operand(
     }
 }
 
-/// Main entry point: resolve all call sites in a function.
+
 pub fn resolve_calls(
     func: &Function,
     rodata: &HashMap<u64, String>,
@@ -195,14 +155,10 @@ pub fn resolve_calls(
     resolved
 }
 
-/// Identify struct access patterns: groups of Load statements that share the
-/// same base Var but different offsets. Each group suggests a struct type.
+
 pub struct StructPattern {
-    /// The Var holding the base pointer.
     pub base_var: usize,
-    /// Offsets accessed on this base.
     pub offsets: Vec<i64>,
-    /// If the base came from a call, this is the callee name.
     pub origin_call: Option<String>,
 }
 
@@ -222,7 +178,7 @@ pub fn find_struct_patterns(func: &Function) -> Vec<StructPattern> {
     }
 
     base_to_offsets.into_iter()
-        .filter(|(_, offsets)| offsets.len() >= 2) // at least 2 field accesses to suggest a struct
+        .filter(|(_, offsets)| offsets.len() >= 2)
         .map(|(var_id, mut offsets)| {
             offsets.sort_unstable();
             offsets.dedup();
