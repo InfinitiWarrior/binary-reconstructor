@@ -1,19 +1,3 @@
-/// Code emitter
-///
-/// Input: a Function (IR + CFG) + resolved call sites + struct patterns
-/// Output: C code that reflects what the binary actually does
-///
-/// The output is NOT clean idiomatic C. It is a faithful translation of the
-/// binary's control flow and data flow. That's the point: the output should
-/// differ between binaries because it encodes actual logic, not templates.
-///
-/// Emitted code structure:
-///   - One C function per lifted function
-///   - Struct typedefs for each detected struct pattern
-///   - Local variables named after their defining call (buf from malloc, etc.)
-///   - Conditionals reconstructed from CFG branch conditions
-///   - Loops reconstructed from back-edges in the CFG
-
 use crate::ir::{Function, Stmt, Operand};
 use crate::dataflow::{ResolvedCall, ResolvedArg, StructPattern};
 use std::collections::{HashMap, HashSet};
@@ -58,7 +42,7 @@ impl Emitter {
         self.emit_blank();
     }
 
-    /// Emit struct typedefs for detected patterns.
+
     pub fn emit_struct_types(&mut self, patterns: &[StructPattern]) {
         for (i, pat) in patterns.iter().enumerate() {
             let origin = pat.origin_call.as_deref().unwrap_or("unknown");
@@ -66,11 +50,9 @@ impl Emitter {
             self.emit_line(&format!("typedef struct {{"));
             self.indent += 1;
 
-            // Emit a field for each detected offset. We don't know field types;
-            // emit uint64_t as the widest safe placeholder.
             let mut prev_offset: i64 = 0;
             for &off in &pat.offsets {
-                if off < 0 { continue; } // negative offsets are usually stack locals, not struct fields
+                if off < 0 { continue; }
                 let padding = off - prev_offset;
                 if padding > 0 && padding < off {
                     self.emit_line(&format!("uint8_t _pad_{}[{}];", prev_offset, padding));
@@ -85,22 +67,17 @@ impl Emitter {
         }
     }
 
-    /// Emit a lifted function as C.
     pub fn emit_function(
         &mut self,
         func: &Function,
         resolved_calls: &[ResolvedCall],
         struct_patterns: &[StructPattern],
     ) {
-        // Build a lookup: block_id -> resolved calls in that block
         let mut calls_by_block: HashMap<usize, Vec<&ResolvedCall>> = HashMap::new();
         for rc in resolved_calls {
             calls_by_block.entry(rc.block_id).or_default().push(rc);
         }
 
-        // Detect back-edges (loops): a back-edge is a successor that has a lower id
-        // than the current block. This is a simplification; proper loop detection
-        // uses dominance trees. It works for most compiled C loops.
         let back_edge_targets: HashSet<usize> = func.blocks.iter()
             .flat_map(|bb| bb.succs.iter().filter(|&&s| s <= bb.id).copied())
             .collect();
@@ -108,8 +85,8 @@ impl Emitter {
         self.emit_line(&format!("void {}() {{", func.name));
         self.indent += 1;
 
-        // Emit variable declarations for call results we'll name.
-        let mut named_vars: HashMap<String, String> = HashMap::new(); // call target -> var name
+ 
+        let mut named_vars: HashMap<String, String> = HashMap::new();
         for rc in resolved_calls {
             let var_name = call_result_name(&rc.target);
             if !named_vars.contains_key(&rc.target) {
@@ -119,9 +96,7 @@ impl Emitter {
         }
         if !resolved_calls.is_empty() { self.emit_blank(); }
 
-        // Emit each basic block.
         for bb in &func.blocks {
-            // If this is a loop header (has a back-edge pointing to it), emit a loop comment.
             if back_edge_targets.contains(&bb.id) {
                 self.emit_blank();
                 self.emit_line(&format!("/* loop header */"));
@@ -129,15 +104,12 @@ impl Emitter {
 
             self.emit_line(&format!("bb_{}:", bb.id));
             self.indent += 1;
-
-            // Emit the resolved calls for this block.
             if let Some(calls) = calls_by_block.get(&bb.id) {
                 for rc in calls {
                     self.emit_resolved_call(rc, &named_vars);
                 }
             }
 
-            // Emit the terminal statement (branch/jump/return).
             if let Some(terminal) = bb.stmts.iter().rev().find(|s| {
                 matches!(s, Stmt::Branch{..} | Stmt::Jump(_) | Stmt::Return(_))
             }) {
@@ -202,11 +174,9 @@ impl Emitter {
 }
 
 fn call_result_name(target: &str) -> String {
-    // Strip common prefixes to get a clean variable name.
     let base = target
         .trim_start_matches('_')
         .replace(['@', '.', ':', '-'], "_");
-    // Common allocation functions get semantic names.
     match base.as_str() {
         "malloc" | "calloc" | "realloc" => "buf".to_string(),
         "fopen"  => "fp".to_string(),
@@ -220,8 +190,6 @@ fn call_result_name(target: &str) -> String {
 fn format_condition(op: &Operand) -> String {
     match op {
         Operand::Symbol(s, _) => {
-            // The condition was encoded as a string like "eq(v1, v2)" by the CFG builder.
-            // Translate to C.
             if s.starts_with("eq(")  { s.replace("eq(",  "").replace(')', "").replace(", ", " == ") }
             else if s.starts_with("ne(")  { s.replace("ne(",  "").replace(')', "").replace(", ", " != ") }
             else if s.starts_with("lt_s(") { s.replace("lt_s(", "").replace(')', "").replace(", ", " < ") }
